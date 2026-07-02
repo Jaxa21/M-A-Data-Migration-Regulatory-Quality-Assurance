@@ -1,52 +1,92 @@
 # M-A-Data-Migration-Regulatory-Quality-Assurance
-An enterprise-grade ELT data migration architecture featuring built-in statistical credit risk validation and data quality controls tailored to BCBS 239 and regulatory compliance standards.
+
+An end-to-end ELT pipeline simulating a real bank merger scenario: migrating 5 million credit records from a legacy system into a target data warehouse, with built-in regulatory data quality controls, statistical risk validation, and full data lineage — aligned with BCBS 239, KNF, and EBA data management guidelines.
 
 
+Incorrect capital adequacy reporting submitted to KNF or EBA
+Distorted credit risk models (PD, LGD, EAD), leading to wrong provisioning
+Regulatory penalties under BCBS 239, which mandates complete auditability and traceability of every data point used in risk reportin
 
-This project simulates a production-grade environment where 5 million credit records are extracted, cleansed, and transformed while maintaining strict data lineage and auditability under the BCBS 239 risk data aggregation framework.
+utomated Data Quality Enforcement (dbt)
 
-Key Features
-The pipeline addresses real-world financial data engineering challenges through:
+12 schema-level rules are enforced automatically at every pipeline run using dbt test:
 
-Automated Data Quality Framework: Utilizes dbt (data build tool) to verify data integrity at every stage of the ELT process (e.g., validating currency formats, checking for negative loan balances, detecting age anomalies).
 
-Dead Letter Queue (Quarantine System): Malformed records (e.g., corrupted loan amounts or missing reference base rates) do not break the pipeline. They are automatically isolated into an audit table (rejected_loans) for operational review, allowing valid data to proceed downstream uninterrupted.
+loan_amount must be strictly positive
+currency must be one of PLN, EUR, USD (rejects legacy typos like 'eur', 'PL')
+client_age must be between 18 and 100
+probability_of_default must fall within [0.00, 1.00]
+No null values permitted on critical identifiers (loan_id, customer_id)
 
-Statistical Risk Validation (Data Drift Detection): A Python post-migration script leverages the Kolmogorov-Smirnov test to prove that data transformation and cleansing did not distort the original Probability of Default (PD) distribution. The system raises an alert if the post-migration risk profile shifts beyond an acceptable threshold.
 
-Data Lineage & Auditability: Automatically generates a visual dependency graph and documentation proving the origin and transformation steps of every financial metric.
+Corrupted or non-compliant records do not crash the pipeline. They are automatically routed to a dedicated rejected_loans audit table, tagged with a rejection reason and timestamp. Clean records continue downstream to clean_loans. This pattern mirrors production-grade data engineering at financial institutions.
 
- Tech-Stack & Architecture
+Statistical Risk Drift Detection 
 
-Database: PostgreSQL (Simulating two isolated instances: Legacy Source & Target DWH)
+A post-migration validation script mathematically confirms that data transformations (e.g. currency normalisation, rate recalculation) have not altered the statistical distribution of credit risk.
 
-Data Transformation: dbt (Data Build Tool)
+Two tests are applied:
 
-Orchestration: Apache Airflow
+Kolmogorov-Smirnov Test — verifies that the probability_of_default distribution has not shifted between source and target datasets.
 
-Data Generation & Analytics: Python (pandas, scipy.stats, Faker)
+Population Stability Index (PSI) — industry-standard scorecard stability metric used in Polish and European banks during model migrations. PSI < 0.1 = stable, 0.1–0.25 = requires monitoring, > 0.25 = migration alarm.
 
-Infrastructure: Docker & Docker-Compose
+If either test breaches its threshold, the pipeline raises:
 
-Quick Start
-The system is designed with an Infrastructure-as-Code approach. Follow these steps to spin up the environment and generate the mock portfolio data:
+ ALARM: Migration has statistically altered the credit risk profile. Manual review required before regulatory reporting.
+ Data Lineage & Auditability (BCBS 239 / EBA Compliance)
 
-Clone the repository:
+Every transformation is documented through dbt's auto-generated lineage graph. Regulators and internal audit can trace any output metric back to its raw source record — a direct requirement under BCBS Principle 2 (Data Architecture and IT Infrastructure) and EBA Guidelines on Internal Governance (GL/2021/05).
 
-Bash
-git clone https://github.com/YourUsername/bank-ma-data-migration.git
-cd bank-ma-data-migration
-Spin up the containers (PostgreSQL, Airflow, dbt):
 
-Bash
-docker-compose up -d
-Open http://localhost:8080 in your browser to access the Apache Airflow UI (login: admin, password: admin) and trigger the DAG named ma_migration_pipeline.
+Architecture
 
-📂 Repository Structure
-/data_generator/ - Python scripts (Faker) generating the synthetic 5M loan portfolio. Zero real-world PII/GDPR data included.
+┌─────────────────────┐     ELT      ┌──────────────────────┐
+│  PostgreSQL (Source) │ ──────────► │  PostgreSQL (Target)  │
+│  Bank B Legacy DB    │             │  Bank A Data Warehouse│
+│  ~5M loan records    │             │  clean_loans table    │
+│  with intentional    │             │  rejected_loans DLQ   │
+│  data quality errors │             └──────────────────────┘
+└─────────────────────┘                        │
+          │                                    │
+          ▼                                    ▼
+   ┌─────────────┐                   ┌──────────────────────┐
+   │    dbt      │                   │  validate_migration   │
+   │  12 quality │                   │  .py                  │
+   │  rules      │                   │  KS-test + PSI        │
+   │  DLQ router │                   │  risk drift detection │
+   └─────────────┘                   └──────────────────────┘
+          │                                    │
+          └──────────────┬─────────────────────┘
+                         ▼
+              ┌─────────────────────┐
+              │   Apache Airflow    │
+              │   Orchestration DAG │
+              │   ma_migration_     │
+              │   pipeline          │
+              └─────────────────────┘
 
-/dbt_project/ - SQL models, macros, and schema test configurations (Data Quality rules).
+LayerTechnologyPurposeSource & Target DBPostgreSQLTwo isolated instances simulating legacy bank and target DWHTransformation & Qualitydbt (data build tool)SQL models, schema tests, DLQ routingOrchestrationApache AirflowDAG scheduling, task dependencies, alertingData GenerationPython + FakerSynthetic 5M-row loan portfolio with seeded errorsRisk ValidationPython + scipy, pandasKS-test and PSI post-migration statistical checksInfrastructureDocker + Docker ComposeFull containerised stack, no local dependencies
 
-/airflow/dags/ - Airflow DAG definitions establishing workflow orchestration.
+Airflow DAG: ma_migration_pipeline
 
-/validation/ - Statistical testing modules validating risk parameter distributions post-load.
+check_source_data_available
+        │
+        ▼
+   dbt_run
+   (raw_layer → clean_layer)
+        │
+        ▼
+   dbt_test
+   (12 quality rules enforced)
+        │
+        ├── PASS ──────────────────────────────────►  validate_migration_py
+        │                                              (KS-test + PSI)
+        │                                                      │
+        │                                                      ▼
+        │                                             generate_summary_report
+        │
+        └── FAIL ──► records routed to rejected_loans (DLQ) ──► alert_ops_team
+
+
+RequirementHow this project addresses itBCBS 239 – Principle 2 (Data Architecture)Containerised, reproducible infrastructure with version-controlled transformationsBCBS 239 – Principle 3 (Accuracy & Integrity)12 automated dbt quality tests enforced on every pipeline runBCBS 239 – Principle 6 (Adaptability)Modular dbt models — new source systems can be onboarded by adding a new model layerEBA GL/2021/05 (Internal Governance)Full data lineage graph auto-generated by dbt; every output metric traceable to raw sourceKNF supervisory expectationsDead Letter Queue ensures rejected records are isolated and logged, never silently dropped or corrupting downstream aggregates
