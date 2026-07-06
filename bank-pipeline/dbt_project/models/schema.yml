@@ -1,0 +1,143 @@
+version: 2
+
+# ─────────────────────────────────────────────────────────────
+# SOURCE DEFINITION
+# Points dbt to the Bank B legacy database (source-db container).
+# In production this would be a separate dbt project or source
+# connected via a database link.
+# ─────────────────────────────────────────────────────────────
+
+sources:
+  - name: bank_b_legacy
+    description: "Bank B legacy core banking system (pre-merger source)"
+    database: bank_b_legacy
+    schema: legacy
+    tables:
+      - name: legacy_loans
+        description: "Raw loan portfolio from Bank B legacy system. Contains known data quality issues."
+        columns:
+          - name: loan_id
+            description: "Primary identifier from legacy system. Format varies."
+          - name: customer_id
+            description: "Customer identifier. May not match Bank A customer IDs."
+          - name: loan_amount
+            description: "Original loan principal. May be negative or null (known legacy bug)."
+          - name: currency
+            description: "Currency code. May contain typos (legacy system had no validation)."
+          - name: probability_of_default
+            description: "PD score from Bank B risk model. Range 0.0–1.0 in theory."
+
+
+# ─────────────────────────────────────────────────────────────
+# MODEL DEFINITIONS & TESTS
+# ─────────────────────────────────────────────────────────────
+
+models:
+
+  # ── RAW LAYER ────────────────────────────────────────────────
+  - name: raw_loans
+    description: >
+      Verbatim copy of Bank B legacy loans. No transformations applied.
+      Required for BCBS 239 data lineage — provides the unmodified
+      source record for any audit query.
+    columns:
+      - name: loan_id
+        description: "Loan identifier from source"
+        tests:
+          - not_null
+
+      - name: customer_id
+        description: "Customer identifier from source"
+        tests:
+          - not_null
+
+      - name: ingested_at
+        description: "Timestamp when record was copied into raw layer"
+        tests:
+          - not_null
+
+  # ── CLEAN LAYER ───────────────────────────────────────────────
+  - name: clean_loans
+    description: >
+      Validated, standardised loan records ready for regulatory reporting.
+      Only records passing all 6 quality rules appear here.
+      Rejected records are routed to quarantine.rejected_loans by the
+      post-dbt Python routing script.
+    tests:
+      # Table-level test: clean layer must never be empty after a successful run
+      - dbt_utils.recency:
+          datepart: hour
+          field: loaded_at
+          interval: 25
+
+    columns:
+      - name: loan_id
+        description: "Loan identifier (from raw layer)"
+        tests:
+          - not_null
+          - unique
+
+      - name: customer_id
+        description: "Customer identifier"
+        tests:
+          - not_null
+
+      - name: loan_amount_pln
+        description: "Loan amount normalised to PLN. Must be strictly positive."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0.01"
+              name: chk_positive_amount
+
+      - name: currency_standardised
+        description: "ISO 4217 currency code after standardisation."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["PLN", "EUR", "USD"]
+              name: chk_valid_currency
+
+      - name: client_age
+        description: "Client age in years. Must be between 18 and 100."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 18 AND 100"
+              name: chk_client_age_range
+
+      - name: probability_of_default
+        description: "PD score. Must be a valid probability [0.0, 1.0]."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 0.0 AND 1.0"
+              name: chk_pd_range
+
+      - name: interest_rate
+        description: "Annual interest rate. Must be non-negative."
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+              name: chk_positive_interest_rate
+
+      - name: pd_band
+        description: "Risk segment derived from PD."
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+              name: chk_pd_band_values
+
+      - name: margin_rate
+        description: "Interest margin over WIBOR. Negative margin is a data anomaly."
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= -0.5"   # small negative allowed (rounding edge cases)
+              name: chk_reasonable_margin
+
+      - name: loaded_at
+        description: "Timestamp when record was written to clean layer."
+        tests:
+          - not_null
