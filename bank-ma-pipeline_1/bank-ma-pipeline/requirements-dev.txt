@@ -1,0 +1,5 @@
+# Testing dependencies — not needed to run the pipeline itself,
+# only for running the unit test suite (tests/)
+
+pytest==8.0.0
+pytest-cov==4.1.0
