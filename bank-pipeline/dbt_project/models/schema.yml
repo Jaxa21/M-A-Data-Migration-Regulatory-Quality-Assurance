@@ -1,0 +1,67 @@
+version: 2
+
+sources:
+  - name: bank_b_legacy
+    description: "Bank B legacy core banking system (pre-merger source)"
+    database: bank_b_legacy
+    schema: legacy
+    tables:
+      - name: legacy_loans
+        description: "Raw loan portfolio from Bank B. Contains intentional data quality issues."
+
+models:
+  - name: raw_loans
+    description: "Verbatim copy of Bank B legacy loans. No transformations applied."
+    columns:
+      - name: loan_id
+        tests: [not_null]
+      - name: customer_id
+        tests: [not_null]
+      - name: ingested_at
+        tests: [not_null]
+
+  - name: clean_loans
+    description: "Validated, standardised loans ready for regulatory reporting."
+    columns:
+      - name: loan_id
+        tests: [not_null, unique]
+      - name: customer_id
+        tests: [not_null]
+      - name: loan_amount_pln
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0.01"
+              name: chk_positive_amount
+      - name: currency_standardised
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["PLN", "EUR", "USD"]
+              name: chk_valid_currency
+      - name: client_age
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 18 AND 100"
+              name: chk_client_age_range
+      - name: probability_of_default
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "BETWEEN 0.0 AND 1.0"
+              name: chk_pd_range
+      - name: interest_rate
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+              name: chk_positive_interest_rate
+      - name: pd_band
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+              name: chk_pd_band_values
+      - name: loaded_at
+        tests: [not_null]
